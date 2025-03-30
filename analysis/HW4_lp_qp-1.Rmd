@@ -1,16 +1,19 @@
 ---
-title: 'Homework 4'
-header-includes:
-  - \usepackage{multirow}
+title: "Homework 4"
+header-includes: \usepackage{multirow}
 output:
-  pdf_document: default
+  pdf_document:
+      latex_engine: xelatex
+  html_document:
+    df_print: paged
 urlcolor: blue
 ---
 
 ```{r, include=FALSE}
-
 library(tidyverse)
 knitr::opts_chunk$set(tidy = FALSE)
+library(here)
+library(corrplot)
 ```
 
 ## Context
@@ -58,6 +61,8 @@ To that end:
 * Submit your whole project folder to GitHub 
 * Submit a PDF knitted from Rmd to Canvas. Your solutions to the problems here should be implemented in your .Rmd file, and your git commit history should reflect the process you used to solve these Problems.
 
+**Github repo:** https://github.com/ytliu36/bios731_hw4_liu.git
+
 ## Problem 1: Exploratory data analysis
 
 Perform some EDA for this data. Your EDA should explore the following questions:
@@ -68,6 +73,21 @@ Perform some EDA for this data. Your EDA should explore the following questions:
 
 Summarize key findings from your EDA in one paragraph and 2-3 figures or tables. 
 
+```{r, echo = F}
+dat<-readRDS(here("data","cannabis.rds"))
+n<-length(unique(dat$id))
+p<-ncol(dat)-2 #remove 1 id and 1 outcome
+# Compute correlation matrix
+hist(dat$t_mmr1, main = "Distribution of Metabolite Molar Ratio", xlab = "mmr")
+```
+
+```{r, echo = F, fig.width=9, fig.height=7}
+# Compute correlation matrix
+cor_matrix <- cor(dat[,-c(1,2)], use = "pairwise.complete.obs") 
+corrplot(cor_matrix, type = "lower", tl.col = "black")
+```
+
+**Summary:** There are 57 subjects and 27 predictors in the dataset. The outcome, metabolite molar ratio is right-skewed. Based on the corrlation matrix, there's not many highly correlated predictors, only the correlation between 8 pairs, including: p_fpc1 and p_change (r = 0.72), p_change and p_auc (r = -0.76), i_prop_false_timeout and i_prop_failed2 (r = 0.64), i_judgement_time1 and i_judgement_time2 (r = 0.74), i_rep_shapes34 and i_memory_time34 (r = -0.62),  i_rep_shapes34 and i_composite_score (r = -0.90), i_memory_time12 and i_memory_time34 (r = 0.66), h_dbp and h_sbp (r = 0.72).
 
 ## Problem 2: Quantile regression
 
@@ -82,8 +102,63 @@ package).
 * Compare with mean obtain using linear regression
 * Summarize findings
 
+```{r}
+library(lpSolve)
+
+my_rq <- function(y, X, tau) {
+  n <- length(y)
+  p <- ncol(X)
+  
+  # Modify design matrix to allow negative betas
+  X_new <- cbind(X, -X)  # Create β+ and β- (splitting each β into positive and negative parts)
+  
+  # Construct LP problem
+  f.obj <- c(rep(0, 2 * p), rep(tau, n), rep(1 - tau, n))  # Objective function
+  f.con <- cbind(X_new, diag(n), -diag(n))  # Constraint matrix
+  f.rhs <- y  # Right-hand side
+  f.dir <- rep("=", n)  # Constraints are equality constraints
+  
+  # Solve LP
+  lp_result <- lp("min", f.obj, f.con, f.dir, f.rhs, all.int = FALSE)
+  
+  # Extract beta coefficients
+  beta_hat <- lp_result$solution[1:p] - lp_result$solution[(p + 1):(2 * p)]  # β = β+ - β-
+  return(beta_hat)
+}
+
+
+```
+
+```{r}
+library(quantreg)
+
+# Prepare variables
+y <- dat$t_mmr1
+X <- cbind(1, dat$p_change, dat$h_hr, dat$i_composite_score)  # Add intercept
+
+# Estimate at quantiles 0.25, 0.5, and 0.75
+tau_vals <- c(0.25, 0.5, 0.75)
+my_rq_results <- lapply(tau_vals, function(tau) my_rq(y, X, tau))
+names(my_rq_results) <- paste0("tau_", tau_vals)
+
+# Compare with rq()
+rq_results <- lapply(tau_vals, function(tau) coef(rq(t_mmr1 ~ p_change + h_hr + i_composite_score, tau = tau, data = dat)))
+names(rq_results) <- paste0("tau_", tau_vals)
+
+# Compare with OLS
+ols_result <- coef(lm(t_mmr1 ~ p_change + h_hr + i_composite_score, data = dat))
+
+# Print results
+list("My Quantile Regression" = my_rq_results, "RQ Function" = rq_results, "OLS" = ols_result)
+
+```
 
 When explaining your results, be sure to explain what LP method you used for estimating quantile regression.
+
+**Answer:** 
+As for the quantile regression, it minimize $\sum_{i=1}^n \rho_\tau(y_i-x_i\beta)$, which is equivalent to minimize $\sum_{i=1}^n(\tau u_i+(1-\tau)v_i)$ when define $u_i = [y_i-x_i\beta]_+ \geq0$ and $v_i = [y_i-x_i\beta]_-\geq0$ and $y_i = x_i\beta+u_i-v_i$. The above linear programming is solved by `lp()` in `lpSolve`.
+
+`my_rq()` and `rq()` give the same result at each quantile given, and the association between predictors and outcomes vary at each quantile, p_change and t_mmr1 is positively correlated, but with highest correlation at $\tau$ = 0.5 compared to the other 2. h_hr is also positively correlated with t_mmr1 and correlation become stronger with higher $\tau$. At smaller $\tau$, i_composite_score has positive correlation at $\tau$ = 0.25 and 0.5, but become negative when $\tau$=0.75. OLS is able to detect the positive correlation of p_change and h_hr, but failed to identify the positive correlation of i_composite_score at lower quantiles. 
 
 ## Problem 3: Implementation of LASSO
 
@@ -104,4 +179,56 @@ $Y$ (response), $X$ (predictor), and $lambda$ (tuning parameter), and return the
 * Compare your results with those estimated using the `cv.glmnet` function in R from the `glmnet` package
 * Summarize findings
 
+```{r}
+library(LowRankQP)
+
+my_lasso <- function(Y, X, lambda) {
+  n <- nrow(X)
+  p <- ncol(X)
+  
+  mat<-cbind(diag(p), -diag(p))
+  # Construct quadratic term
+  Dmat <- t(mat)%*%crossprod(X)%*%mat # X'X (2p x 2p)-alpha estimated is c(u,v)
+  dvec <- -t(mat)%*%crossprod(X, Y) # -X'Y (2p x 1)
+  
+  # Constraints:sum u+v = lambda
+  Amat <- matrix(rep(1, 2 * p), ncol = 2*p)  # (2p x 1)
+  bvec <-c(lambda)  # (2p x 1)
+
+  # Solve QP problem
+  sol <- LowRankQP(Dmat, dvec, Amat, bvec, u = rep(100, 2*p))
+
+  # Extract beta coefficients
+  beta_hat <- sol$alpha[1:p]-sol$alpha[(p+1):(2*p)]
+  return(beta_hat)
+}
+```
+
+```{r}
+library(glmnet)
+# Prepare X and Y
+X <- as.matrix(dat[, -c(1, 2)])
+X <- scale(X) 
+Y <- log(dat$t_mmr1+1e-4)  # Log-transform outcome
+
+# Run my LASSO function
+lambda_val <- 0.7
+beta_lasso <- my_lasso(Y, X, lambda_val)
+beta_lasso
+# Compare with glmnet
+cv_fit <- cv.glmnet(X, Y)
+beta_glmnet <- coef(cv_fit, s = "lambda.min")[-1]
+beta_glmnet
+```
+```{r}
+beta_matrix <- rbind(beta_lasso, beta_glmnet)
+
+barplot(beta_matrix, beside = TRUE, names.arg = colnames(X),
+        col = c("blue", "red"), legend.text = c("my_lasso", "cv.glmnet"),
+        main = "Coeffecients estimation")
+
+```
+
 The results will not be exactly the same because the estimation procedures are different, but trends (which variables are selected) should be similar.
+
+**Summary:** From the plot above we can see at lambda = 0.7, although the absolute value of my_lasso estimation is relatively small, the predictors selected and the sign of estimated coefficients are mostly the same.
